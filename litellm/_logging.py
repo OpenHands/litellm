@@ -41,11 +41,28 @@ class JsonFormatter(Formatter):
         return json.dumps(json_record)
 
 
+# Global handler for JSON exception logging
+_json_error_handler = None
+
+
+def _get_json_error_handler():
+    """Get or create the JSON error handler."""
+    global _json_error_handler
+    if _json_error_handler is None:
+        _json_error_handler = logging.StreamHandler()
+        _json_error_handler.setFormatter(JsonFormatter())
+    return _json_error_handler
+
+
 # Function to set up exception handlers for JSON logging
 def _setup_json_exception_handlers(formatter):
     # Create a handler with JSON formatting for exceptions
     error_handler = logging.StreamHandler()
     error_handler.setFormatter(formatter)
+
+    # Update global handler
+    global _json_error_handler
+    _json_error_handler = error_handler
 
     # Setup excepthook for uncaught exceptions
     def json_excepthook(exc_type, exc_value, exc_traceback):
@@ -62,27 +79,67 @@ def _setup_json_exception_handlers(formatter):
 
     sys.excepthook = json_excepthook
 
-    # Configure asyncio exception handler if possible
+    # Note: asyncio exception handler is set separately via _setup_asyncio_json_exception_handler()
+    # because at import time, the event loop may not be the one used by uvicorn
+
+
+def _setup_asyncio_json_exception_handler():
+    """
+    Set up the asyncio exception handler for JSON logging.
+
+    This should be called AFTER the event loop is created (e.g., in proxy_startup_event)
+    to ensure the handler is set on the correct event loop used by uvicorn.
+    """
+    if not json_logs:
+        return
+
     try:
         import asyncio
+
+        error_handler = _get_json_error_handler()
 
         def async_json_exception_handler(loop, context):
             exception = context.get("exception")
             if exception:
+                # Extract traceback from the exception object
+                exc_info = (type(exception), exception, exception.__traceback__)
+                # Use the message from context if available, otherwise use str(exception)
+                message = context.get("message", str(exception))
                 record = logging.LogRecord(
                     name="LiteLLM",
                     level=logging.ERROR,
                     pathname="",
                     lineno=0,
-                    msg=str(exception),
+                    msg=message,
+                    args=(),
+                    exc_info=exc_info,
+                )
+                error_handler.handle(record)
+            else:
+                # For non-exception errors, still log as JSON
+                message = context.get("message", "Unknown asyncio error")
+                record = logging.LogRecord(
+                    name="LiteLLM",
+                    level=logging.ERROR,
+                    pathname="",
+                    lineno=0,
+                    msg=message,
                     args=(),
                     exc_info=None,
                 )
                 error_handler.handle(record)
-            else:
-                loop.default_exception_handler(context)
 
-        asyncio.get_event_loop().set_exception_handler(async_json_exception_handler)
+        # Get the running event loop and set the exception handler
+        try:
+            loop = asyncio.get_running_loop()
+            loop.set_exception_handler(async_json_exception_handler)
+        except RuntimeError:
+            # No running event loop, try get_event_loop as fallback
+            try:
+                loop = asyncio.get_event_loop()
+                loop.set_exception_handler(async_json_exception_handler)
+            except Exception:
+                pass
     except Exception:
         pass
 

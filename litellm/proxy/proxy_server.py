@@ -496,7 +496,14 @@ async def proxy_startup_event(app: FastAPI):
     global prisma_client, master_key, use_background_health_checks, llm_router, llm_model_list, general_settings, proxy_budget_rescheduler_min_time, proxy_budget_rescheduler_max_time, litellm_proxy_admin_name, db_writer_client, store_model_in_db, premium_user, _license_check
     import json
 
+    from litellm._logging import _setup_asyncio_json_exception_handler
+
     init_verbose_loggers()
+
+    # Set up asyncio exception handler for JSON logging
+    # This must be done after the event loop is created by uvicorn
+    _setup_asyncio_json_exception_handler()
+
     ## CHECK PREMIUM USER
     verbose_proxy_logger.debug(
         "litellm.proxy.proxy_server.py::startup() - CHECKING PREMIUM USER - {}".format(
