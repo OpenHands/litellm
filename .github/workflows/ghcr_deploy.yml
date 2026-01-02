@@ -6,7 +6,7 @@ on:
       tag:
         description: "The tag version you want to build"
       release_type:
-        description: "The release type you want to build. Can be 'latest', 'stable', 'dev'"
+        description: "The release type you want to build. Can be 'latest', 'stable', 'dev', 'rc'"
         type: string
         default: "latest"
       commit_hash:
@@ -73,7 +73,14 @@ jobs:
           push: true
           file: ./litellm-js/spend-logs/Dockerfile
           tags: litellm/litellm-spend_logs:${{ github.event.inputs.tag || 'latest' }}
-      
+      -
+        name: Build and push litellm-non_root image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          file: ./docker/Dockerfile.non_root
+          tags: litellm/litellm-non_root:${{ github.event.inputs.tag || 'latest' }}
   build-and-push-image:
     runs-on: ubuntu-latest
     # Sets the permissions granted to the `GITHUB_TOKEN` for the actions in this job.
@@ -114,8 +121,9 @@ jobs:
           tags: |
             ${{ steps.meta.outputs.tags }}-${{ github.event.inputs.tag || 'latest' }},
             ${{ steps.meta.outputs.tags }}-${{ github.event.inputs.release_type }}
-            ${{ github.event.inputs.release_type == 'stable' && format('{0}/berriai/litellm:main-{1}', env.REGISTRY, github.event.inputs.tag) || '' }},
-            ${{ github.event.inputs.release_type == 'stable' && format('{0}/berriai/litellm:main-stable', env.REGISTRY) || '' }}
+            ${{ (github.event.inputs.release_type == 'stable'  || github.event.inputs.release_type == 'rc') && format('{0}/berriai/litellm:main-{1}', env.REGISTRY, github.event.inputs.tag) || '' }},
+            ${{ github.event.inputs.release_type == 'stable' && format('{0}/berriai/litellm:main-stable', env.REGISTRY) || '' }},
+            ${{ (github.event.inputs.release_type == 'stable'  || github.event.inputs.release_type == 'rc') && format('{0}/berriai/litellm:{1}', env.REGISTRY, github.event.inputs.tag) || '' }},
           labels: ${{ steps.meta.outputs.labels }}
           platforms: local,linux/amd64,linux/arm64,linux/arm64/v8
   
@@ -157,7 +165,7 @@ jobs:
           tags: |
             ${{ steps.meta-ee.outputs.tags }}-${{ github.event.inputs.tag || 'latest' }},
             ${{ steps.meta-ee.outputs.tags }}-${{ github.event.inputs.release_type }}
-            ${{ github.event.inputs.release_type == 'stable' && format('{0}/berriai/litellm-ee:main-{1}', env.REGISTRY, github.event.inputs.tag) || '' }},
+            ${{ (github.event.inputs.release_type == 'stable'  || github.event.inputs.release_type == 'rc') && format('{0}/berriai/litellm-ee:main-{1}', env.REGISTRY, github.event.inputs.tag) || '' }},
             ${{ github.event.inputs.release_type == 'stable' && format('{0}/berriai/litellm-ee:main-stable', env.REGISTRY) || '' }}
           labels: ${{ steps.meta-ee.outputs.labels }}
           platforms: local,linux/amd64,linux/arm64,linux/arm64/v8
@@ -200,7 +208,7 @@ jobs:
           tags: |
             ${{ steps.meta-database.outputs.tags }}-${{ github.event.inputs.tag || 'latest' }},
             ${{ steps.meta-database.outputs.tags }}-${{ github.event.inputs.release_type }}
-            ${{ github.event.inputs.release_type == 'stable' && format('{0}/berriai/litellm-database:main-{1}', env.REGISTRY, github.event.inputs.tag) || '' }},
+            ${{ (github.event.inputs.release_type == 'stable'  || github.event.inputs.release_type == 'rc') && format('{0}/berriai/litellm-database:main-{1}', env.REGISTRY, github.event.inputs.tag) || '' }},
             ${{ github.event.inputs.release_type == 'stable' && format('{0}/berriai/litellm-database:main-stable', env.REGISTRY) || '' }}
           labels: ${{ steps.meta-database.outputs.labels }}
           platforms: local,linux/amd64,linux/arm64,linux/arm64/v8
@@ -243,7 +251,7 @@ jobs:
           tags: |
             ${{ steps.meta-non_root.outputs.tags }}-${{ github.event.inputs.tag || 'latest' }},
             ${{ steps.meta-non_root.outputs.tags }}-${{ github.event.inputs.release_type }}
-            ${{ github.event.inputs.release_type == 'stable' && format('{0}/berriai/litellm-non_root:main-{1}', env.REGISTRY, github.event.inputs.tag) || '' }},
+            ${{ (github.event.inputs.release_type == 'stable'  || github.event.inputs.release_type == 'rc') && format('{0}/berriai/litellm-non_root:main-{1}', env.REGISTRY, github.event.inputs.tag) || '' }},
             ${{ github.event.inputs.release_type == 'stable' && format('{0}/berriai/litellm-non_root:main-stable', env.REGISTRY) || '' }}
           labels: ${{ steps.meta-non_root.outputs.labels }} 
           platforms: local,linux/amd64,linux/arm64,linux/arm64/v8
@@ -286,7 +294,7 @@ jobs:
           tags: |
             ${{ steps.meta-spend-logs.outputs.tags }}-${{ github.event.inputs.tag || 'latest' }},
             ${{ steps.meta-spend-logs.outputs.tags }}-${{ github.event.inputs.release_type }}
-            ${{ github.event.inputs.release_type == 'stable' && format('{0}/berriai/litellm-spend_logs:main-{1}', env.REGISTRY, github.event.inputs.tag) || '' }},
+            ${{ (github.event.inputs.release_type == 'stable'  || github.event.inputs.release_type == 'rc') && format('{0}/berriai/litellm-spend_logs:main-{1}', env.REGISTRY, github.event.inputs.tag) || '' }},
             ${{ github.event.inputs.release_type == 'stable' && format('{0}/berriai/litellm-spend_logs:main-stable', env.REGISTRY) || '' }}
           platforms: local,linux/amd64,linux/arm64,linux/arm64/v8
 
@@ -330,7 +338,9 @@ jobs:
           if [ -z "${CHART_LIST}" ]; then
             echo "current-version=0.1.0" | tee -a $GITHUB_OUTPUT
           else
-            printf '%s' "${CHART_LIST}" | grep '^version:' | awk 'BEGIN{FS=":"}{print "current-version="$2}' | tr -d " " | tee -a $GITHUB_OUTPUT
+            # Extract version and strip any prerelease suffix (e.g., 0.1.827-latest -> 0.1.827)
+            VERSION=$(printf '%s' "${CHART_LIST}" | grep '^version:' | awk 'BEGIN{FS=":"}{print $2}' | tr -d " " | cut -d'-' -f1)
+            echo "current-version=${VERSION}" | tee -a $GITHUB_OUTPUT
           fi
         env:
           HELM_EXPERIMENTAL_OCI: '1'
@@ -343,11 +353,24 @@ jobs:
           current-version: ${{ steps.current_version.outputs.current-version || '0.1.0' }}
           version-fragment: 'bug'
 
+      # Add suffix for non-stable releases (semantic versioning)
+      - name: Calculate chart version with prerelease suffix
+        id: chart_version
+        shell: bash
+        run: |
+          BASE_VERSION="${{ steps.bump_version.outputs.next-version || '0.1.0' }}"
+          RELEASE_TYPE="${{ github.event.inputs.release_type }}"
+          if [ "$RELEASE_TYPE" = "stable" ]; then
+            echo "version=${BASE_VERSION}" | tee -a $GITHUB_OUTPUT
+          else
+            echo "version=${BASE_VERSION}-${RELEASE_TYPE}" | tee -a $GITHUB_OUTPUT
+          fi
+
       - uses: ./.github/actions/helm-oci-chart-releaser
         with:
           name: ${{ env.CHART_NAME }}
           repository: ${{ env.REPO_OWNER }}
-          tag: ${{ github.event.inputs.chartVersion || steps.bump_version.outputs.next-version || '0.1.0' }}
+          tag: ${{ github.event.inputs.chartVersion || steps.chart_version.outputs.version || '0.1.0' }}
           app_version: ${{ steps.current_app_tag.outputs.latest_tag }}
           path: deploy/charts/${{ env.CHART_NAME }}
           registry: ${{ env.REGISTRY }}

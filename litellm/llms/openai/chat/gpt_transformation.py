@@ -1,5 +1,5 @@
 """
-Support for gpt model family 
+Support for gpt model family
 """
 
 from typing import (
@@ -11,6 +11,7 @@ from typing import (
     List,
     Literal,
     Optional,
+    Tuple,
     Union,
     cast,
     overload,
@@ -56,6 +57,7 @@ from ..common_utils import OpenAIError
 
 if TYPE_CHECKING:
     from litellm.litellm_core_utils.litellm_logging import Logging as _LiteLLMLoggingObj
+    from litellm.types.llms.openai import ChatCompletionToolParam
 
     LiteLLMLoggingObj = _LiteLLMLoggingObj
 else:
@@ -89,6 +91,9 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
     - `top_p` (number or null): An alternative to sampling with temperature, used for nucleus sampling.
     """
 
+    # Add a class variable to track if this is the base class
+    _is_base_class = True
+
     frequency_penalty: Optional[int] = None
     function_call: Optional[Union[str, dict]] = None
     functions: Optional[list] = None
@@ -119,6 +124,8 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
         for key, value in locals_.items():
             if key != "self" and value is not None:
                 setattr(self.__class__, key, value)
+
+        self.__class__._is_base_class = False
 
     @classmethod
     def get_config(cls):
@@ -151,6 +158,8 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
             "parallel_tool_calls",
             "audio",
             "web_search_options",
+            "service_tier",
+            "safety_identifier",
         ]  # works across all models
 
         model_specific_params = []
@@ -159,9 +168,11 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
         ):  # gpt-4 does not support 'response_format'
             model_specific_params.append("response_format")
 
+        # Normalize model name for responses API (e.g., "responses/gpt-4.1" -> "gpt-4.1")
+        model_for_check = model.split("responses/", 1)[1] if "responses/" in model else model
         if (
-            model in litellm.open_ai_chat_completion_models
-        ) or model in litellm.open_ai_text_completion_models:
+            model_for_check in litellm.open_ai_chat_completion_models
+        ) or model_for_check in litellm.open_ai_text_completion_models:
             model_specific_params.append(
                 "user"
             )  # user is not a param supported by all openai-compatible endpoints - e.g. azure ai
@@ -205,41 +216,28 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
             drop_params=drop_params,
         )
 
-    @overload
-    def _handle_pdf_url(
-        self, content_item: ChatCompletionFileObjectFile, is_async: Literal[True]
-    ) -> Coroutine[Any, Any, ChatCompletionFileObjectFile]:
-        ...
-
-    @overload
-    def _handle_pdf_url(
-        self,
-        content_item: ChatCompletionFileObjectFile,
-        is_async: Literal[False] = False,
-    ) -> ChatCompletionFileObjectFile:
-        ...
-
-    def _handle_pdf_url(
-        self, content_item: ChatCompletionFileObjectFile, is_async: bool = False
-    ) -> Union[
-        ChatCompletionFileObjectFile, Coroutine[Any, Any, ChatCompletionFileObjectFile]
-    ]:
+    def contains_pdf_url(self, content_item: ChatCompletionFileObjectFile) -> bool:
         potential_pdf_url_starts = ["https://", "http://", "www."]
-        content_copy = content_item.copy()
-        file_id = content_copy.get("file_id")
+        file_id = content_item.get("file_id")
         if file_id and any(
             file_id.startswith(start) for start in potential_pdf_url_starts
         ):
-            if is_async:
-                return self._async_handle_pdf_url_helper(content_item)
-            else:
-                base64_data = convert_url_to_base64(file_id)
-                content_copy["file_data"] = base64_data
-                content_copy["filename"] = "my_file.pdf"
-                content_copy.pop("file_id")
+            return True
+        return False
+
+    def _handle_pdf_url(
+        self, content_item: ChatCompletionFileObjectFile
+    ) -> ChatCompletionFileObjectFile:
+        content_copy = content_item.copy()
+        file_id = content_copy.get("file_id")
+        if file_id is not None:
+            base64_data = convert_url_to_base64(file_id)
+            content_copy["file_data"] = base64_data
+            content_copy["filename"] = "my_file.pdf"
+            content_copy.pop("file_id")
         return content_copy
 
-    async def _async_handle_pdf_url_helper(
+    async def _async_handle_pdf_url(
         self, content_item: ChatCompletionFileObjectFile
     ) -> ChatCompletionFileObjectFile:
         file_id = content_item.get("file_id")
@@ -250,10 +248,88 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
             content_item.pop("file_id")
         return content_item
 
+    def _common_file_data_check(
+        self, content_item: ChatCompletionFileObjectFile
+    ) -> ChatCompletionFileObjectFile:
+        file_data = content_item.get("file_data")
+        filename = content_item.get("filename")
+        if file_data is not None and filename is None:
+            content_item["filename"] = "my_file.pdf"
+        return content_item
+
+    def _apply_common_transform_content_item(
+        self,
+        content_item: OpenAIMessageContentListBlock,
+    ) -> OpenAIMessageContentListBlock:
+        litellm_specific_params = {"format"}
+        if content_item.get("type") == "image_url":
+            content_item = cast(ChatCompletionImageObject, content_item)
+            if isinstance(content_item["image_url"], str):
+                content_item["image_url"] = {
+                    "url": content_item["image_url"],
+                }
+            elif isinstance(content_item["image_url"], dict):
+                new_image_url_obj = ChatCompletionImageUrlObject(
+                    **{  # type: ignore
+                        k: v
+                        for k, v in content_item["image_url"].items()
+                        if k not in litellm_specific_params
+                    }
+                )
+                content_item["image_url"] = new_image_url_obj
+        elif content_item.get("type") == "file":
+            content_item = cast(ChatCompletionFileObject, content_item)
+            file_obj = content_item["file"]
+            new_file_obj = ChatCompletionFileObjectFile(
+                **{  # type: ignore
+                    k: v
+                    for k, v in file_obj.items()
+                    if k not in litellm_specific_params
+                }
+            )
+            content_item["file"] = new_file_obj
+
+        return content_item
+
+    def _transform_content_item(
+        self,
+        content_item: OpenAIMessageContentListBlock,
+    ) -> OpenAIMessageContentListBlock:
+        content_item = self._apply_common_transform_content_item(content_item)
+        content_item_type = content_item.get("type")
+        potential_file_obj = content_item.get("file")
+        if content_item_type == "file" and potential_file_obj:
+            file_obj = cast(ChatCompletionFileObjectFile, potential_file_obj)
+            content_item_typed = cast(ChatCompletionFileObject, content_item)
+            if self.contains_pdf_url(file_obj):
+                file_obj = self._handle_pdf_url(file_obj)
+            file_obj = self._common_file_data_check(file_obj)
+            content_item_typed["file"] = file_obj
+            content_item = content_item_typed
+        return content_item
+
+    async def _async_transform_content_item(
+        self, content_item: OpenAIMessageContentListBlock, is_async: bool = False
+    ) -> OpenAIMessageContentListBlock:
+        content_item = self._apply_common_transform_content_item(content_item)
+        content_item_type = content_item.get("type")
+        potential_file_obj = content_item.get("file")
+        if content_item_type == "file" and potential_file_obj:
+            file_obj = cast(ChatCompletionFileObjectFile, potential_file_obj)
+            content_item_typed = cast(ChatCompletionFileObject, content_item)
+            if self.contains_pdf_url(file_obj):
+                file_obj = await self._async_handle_pdf_url(file_obj)
+            file_obj = self._common_file_data_check(file_obj)
+            content_item_typed["file"] = file_obj
+            content_item = content_item_typed
+        return content_item
+
+    # fmt: off
+
     @overload
     def _transform_messages(
         self, messages: List[AllMessageValues], model: str, is_async: Literal[True]
-    ) -> Coroutine[Any, Any, List[AllMessageValues]]:
+    ) -> Coroutine[Any, Any, List[AllMessageValues]]: 
         ...
 
     @overload
@@ -265,76 +341,18 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
     ) -> List[AllMessageValues]:
         ...
 
+    # fmt: on
+
     def _transform_messages(
         self, messages: List[AllMessageValues], model: str, is_async: bool = False
     ) -> Union[List[AllMessageValues], Coroutine[Any, Any, List[AllMessageValues]]]:
         """OpenAI no longer supports image_url as a string, so we need to convert it to a dict"""
 
-        def _apply_common_transform_content_item(
-            content_item: OpenAIMessageContentListBlock,
-        ) -> OpenAIMessageContentListBlock:
-            litellm_specific_params = {"format"}
-            if content_item.get("type") == "image_url":
-                content_item = cast(ChatCompletionImageObject, content_item)
-                if isinstance(content_item["image_url"], str):
-                    content_item["image_url"] = {
-                        "url": content_item["image_url"],
-                    }
-                elif isinstance(content_item["image_url"], dict):
-                    new_image_url_obj = ChatCompletionImageUrlObject(
-                        **{  # type: ignore
-                            k: v
-                            for k, v in content_item["image_url"].items()
-                            if k not in litellm_specific_params
-                        }
-                    )
-                    content_item["image_url"] = new_image_url_obj
-            elif content_item.get("type") == "file":
-                content_item = cast(ChatCompletionFileObject, content_item)
-                file_obj = content_item["file"]
-                new_file_obj = ChatCompletionFileObjectFile(
-                    **{  # type: ignore
-                        k: v
-                        for k, v in file_obj.items()
-                        if k not in litellm_specific_params
-                    }
-                )
-                content_item["file"] = new_file_obj
-
-            return content_item
-
-        def _transform_content_item(
-            content_item: OpenAIMessageContentListBlock,
-        ) -> OpenAIMessageContentListBlock:
-            content_item = _apply_common_transform_content_item(content_item)
-            content_item_type = content_item.get("type")
-            potential_file_obj = content_item.get("file")
-            if content_item_type == "file" and potential_file_obj:
-                file_obj = cast(ChatCompletionFileObjectFile, potential_file_obj)
-                content_item_typed = cast(ChatCompletionFileObject, content_item)
-                content_item_typed["file"] = self._handle_pdf_url(file_obj)
-                content_item = content_item_typed
-            return content_item
-
-        async def _async_transform_content_item(
-            content_item: OpenAIMessageContentListBlock, is_async: bool = False
-        ) -> OpenAIMessageContentListBlock:
-            content_item = _apply_common_transform_content_item(content_item)
-            content_item_type = content_item.get("type")
-            potential_file_obj = content_item.get("file")
-            if content_item_type == "file" and potential_file_obj:
-                file_obj = cast(ChatCompletionFileObjectFile, potential_file_obj)
-                content_item_typed = cast(ChatCompletionFileObject, content_item)
-                content_item_typed["file"] = await self._handle_pdf_url(
-                    file_obj, is_async=True
-                )
-                content_item = content_item_typed
-            return content_item
-
         async def _async_transform():
             for message in messages:
                 message_content = message.get("content")
                 message_role = message.get("role")
+
                 if (
                     message_role == "user"
                     and message_content
@@ -344,8 +362,10 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
                         List[OpenAIMessageContentListBlock], message_content
                     )
                     for i, content_item in enumerate(message_content_types):
-                        message_content_types[i] = await _async_transform_content_item(
-                            cast(OpenAIMessageContentListBlock, content_item),
+                        message_content_types[i] = (
+                            await self._async_transform_content_item(
+                                cast(OpenAIMessageContentListBlock, content_item),
+                            )
                         )
             return messages
 
@@ -364,10 +384,33 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
                         List[OpenAIMessageContentListBlock], message_content
                     )
                     for i, content_item in enumerate(message_content):
-                        message_content_types[i] = _transform_content_item(
+                        message_content_types[i] = self._transform_content_item(
                             cast(OpenAIMessageContentListBlock, content_item)
                         )
             return messages
+
+    def remove_cache_control_flag_from_messages_and_tools(
+        self,
+        model: str,  # allows overrides to selectively run this
+        messages: List[AllMessageValues],
+        tools: Optional[List["ChatCompletionToolParam"]] = None,
+    ) -> Tuple[List[AllMessageValues], Optional[List["ChatCompletionToolParam"]]]:
+        from litellm.litellm_core_utils.prompt_templates.common_utils import (
+            filter_value_from_dict,
+        )
+        from litellm.types.llms.openai import ChatCompletionToolParam
+
+        for i, message in enumerate(messages):
+            messages[i] = cast(
+                AllMessageValues, filter_value_from_dict(message, "cache_control")  # type: ignore
+            )
+        if tools is not None:
+            for i, tool in enumerate(tools):
+                tools[i] = cast(
+                    ChatCompletionToolParam,
+                    filter_value_from_dict(tool, "cache_control"),  # type: ignore
+                )
+        return messages, tools
 
     def transform_request(
         self,
@@ -384,6 +427,14 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
             dict: The transformed request. Sent as the body of the API call.
         """
         messages = self._transform_messages(messages=messages, model=model)
+        messages, tools = self.remove_cache_control_flag_from_messages_and_tools(
+            model=model, messages=messages, tools=optional_params.get("tools", [])
+        )
+        if tools is not None and len(tools) > 0:
+            optional_params["tools"] = tools
+
+        optional_params.pop("max_retries", None)
+
         return {
             "model": model,
             "messages": messages,
@@ -401,12 +452,26 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
         transformed_messages = await self._transform_messages(
             messages=messages, model=model, is_async=True
         )
-
-        return {
-            "model": model,
-            "messages": transformed_messages,
-            **optional_params,
-        }
+        transformed_messages, tools = (
+            self.remove_cache_control_flag_from_messages_and_tools(
+                model=model,
+                messages=transformed_messages,
+                tools=optional_params.get("tools", []),
+            )
+        )
+        if tools is not None and len(tools) > 0:
+            optional_params["tools"] = tools
+        if self.__class__._is_base_class:
+            return {
+                "model": model,
+                "messages": transformed_messages,
+                **optional_params,
+            }
+        else:
+            ## allow for any object specific behaviour to be handled
+            return self.transform_request(
+                model, messages, optional_params, litellm_params, headers
+            )
 
     def _passed_in_tools(self, optional_params: dict) -> bool:
         return optional_params.get("tools", None) is not None
@@ -647,8 +712,14 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
         if api_key is None:
             api_key = get_secret_str("OPENAI_API_KEY")
 
+        # Strip api_base to just the base URL (scheme + host + port)
+        parsed_url = httpx.URL(api_base)
+        base_url = f"{parsed_url.scheme}://{parsed_url.host}"
+        if parsed_url.port:
+            base_url += f":{parsed_url.port}"
+
         response = litellm.module_level_client.get(
-            url=f"{api_base}/v1/models",
+            url=f"{base_url}/v1/models",
             headers={"Authorization": f"Bearer {api_key}"},
         )
 
