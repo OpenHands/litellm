@@ -84,6 +84,12 @@ service:
 separateHealthApp: false
 separateHealthPort: 8081
 
+# Override the default probes of the litellm container. When empty, the chart uses
+# httpGet probes on /health/liveliness (liveness) and /health/readiness (readiness, startup).
+livenessProbe: {}
+readinessProbe: {}
+startupProbe: {}
+
 ingress:
   enabled: false
   className: "nginx"

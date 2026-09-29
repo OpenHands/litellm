@@ -160,3 +160,34 @@ tests:
       - equal:
           path: spec.template.spec.containers[0].lifecycle.preStop.exec.command[2]
           value: echo "Container stopping"
+  - it: should use the default probes when none are set
+    template: deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.path
+          value: /health/liveliness
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
+          value: /health/readiness
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.failureThreshold
+          value: 30
+  - it: should work with a custom liveness probe
+    template: deployment.yaml
+    set:
+      livenessProbe:
+        exec:
+          command: ["python3", "-c", "import sys; sys.exit(0)"]
+        periodSeconds: 60
+        failureThreshold: 3
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe
+          value:
+            exec:
+              command: ["python3", "-c", "import sys; sys.exit(0)"]
+            periodSeconds: 60
+            failureThreshold: 3
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
+          value: /health/readiness
